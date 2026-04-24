@@ -35,8 +35,8 @@
  *   Labels i18n via data-lbl-* sur #domain-quota-msg (4 langues).
  *   Bypass optionnel côté client : window.lwpcWhitelisted = true.
  *
- * Gère les MX qui pointent directement vers une IP (ex: zenner.lu → 213.135.240.135).
- * Détection mail providers LU : POST Luxembourg (pt.lu), Visual Online (vo.lu), internet.lu.
+ * Handles MX records that point directly to an IP address (e.g. `10 1.2.3.4`).
+ * Detects a few LU mail providers (pt.lu, vo.lu, internet.lu) for nicer labels.
  *
  * ⚠ Après modification, supprimer resources/ et rebuild (Hugo cache les assets).
  */
@@ -373,7 +373,7 @@
      client, pas delivery), et le port 25 sortant est fermé sur notre serveur.
      Un lien externe vers internet.nl/mail/{domain}/ est ajouté sous la table
      pour l'audit TLS MX complet.
-     Handles both hostname MX and direct IP MX (e.g. "10 213.135.240.135").
+     Handles both hostname MX and direct IP MX (e.g. "10 203.0.113.5").
      ══════════════════════════════════════════════════════════════ */
 
   async function analyzeMail(domain) {
@@ -385,7 +385,7 @@
         return;
       }
 
-      /* Parse MX : "10 mail.example.com." or "10 213.135.240.135" */
+      /* Parse MX : "10 mail.example.com." or "10 203.0.113.5" (direct IP) */
       var mxList = mxRecords.map(function (r) {
         var parts = r.data.split(' ');
         var host = (parts[1] || parts[0] || '').replace(/\.$/, '');
