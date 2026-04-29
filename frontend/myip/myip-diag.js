@@ -147,29 +147,6 @@
     });
   }
 
-  /* ── 1bis. DB-IP enrichi (clé publique restreinte aux origins lwpc.lu,
-        injectée par Hugo via window.LWPC_DBIP_PUBLIC_KEY). Renvoie linkType
-        (dsl/cable/fttx/cellular/dialup), usageType (consumer/business/
-        corporate/hosting/cdn/government/...), isProxy + proxyType, isAnycast,
-        threatLevel + threatDetails, geoloc complète. C'est le signal qui
-        rend le diagnostic précis MONDIALEMENT et permet de retirer le
-        mapping ASN luxembourgeois hardcodé.
-
-        Endpoint /self : DB-IP utilise l'IP de la requête (pas besoin de
-        passer l'IP). La clé publique ne marche QUE pour cette IP — on ne
-        peut pas l'abuser pour faire du lookup arbitraire. */
-  function fetchDbip() {
-    var key = (typeof window !== 'undefined' && window.LWPC_DBIP_PUBLIC_KEY) || '';
-    if (!key) return Promise.resolve(null);
-    return fetch('https://api.db-ip.com/v2/' + encodeURIComponent(key) + '/self', { cache: 'no-store' })
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (!data || data.error) return null;
-        return data;
-      })
-      .catch(function () { return null; });
-  }
-
   /* ── 2. RTT (5 fetches /api/myip/ping, médiane) + HTTP (nextHopProtocol)
         + TLS (Cloudflare trace champ tls=). Le TLS ne peut pas venir de
         $ssl_protocol nginx car HAProxy fait le handshake TLS en amont
@@ -343,14 +320,16 @@
     var stunUrls = ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'];
     var probePromise = stunProbe(stunUrls);
 
-    /* DB-IP enrichi — fetch en parallèle du STUN. Si la clé publique est
-       absente ou DB-IP renvoie une erreur, on tombe sur null et le scoring
-       retombe sur la logique ASN hardcodée (fallback rétrocompatible). */
-    var dbipPromise = fetchDbip();
+    /* DB-IP enrichi — vient désormais du backend (handleMyIp /api/myip
+       inclut un sous-objet `dbip` quand DBIP_API_KEY est posée côté serveur).
+       La clé privée n'est pas restreinte par origin (contrairement à la
+       publique trial limitée à 1 origin), et le backend fait du cache 1h.
+       Si DB-IP est absent (pas de clé, plan expiré, panne), d.dbip est
+       undefined → scoring retombe sur la logique ASN hardcodée. */
+    var dbip = (d && d.dbip) || null;
 
-    Promise.all([probePromise, rttPromise, dbipPromise]).then(function (results) {
+    Promise.all([probePromise, rttPromise]).then(function (results) {
       var probe = results[0];
-      var dbip = results[2];
 
       /* Host candidates — affichage Local Network */
       renderLocal(probe.host || []);

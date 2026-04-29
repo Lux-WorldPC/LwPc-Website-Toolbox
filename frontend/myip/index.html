@@ -145,9 +145,9 @@
   Part of <a href="https://github.com/Lux-WorldPC/toolbox">@lwpc/toolbox</a> — MIT licensed
 </footer>
 
-<!-- Optional: DB-IP public API key for richer diagnostic (linkType, usageType, isProxy, threatLevel).
-     Restrict the key to your own domain in the DB-IP dashboard. Leave empty to skip silently. -->
-<script>window.LWPC_DBIP_PUBLIC_KEY = "";</script>
+<!-- DB-IP enrichment is now backend-side: set DBIP_API_KEY in your secret-proxy
+     .env and the /api/myip response will include a `dbip` object that
+     myip-diag.js consumes. No client-side public key needed. -->
 <script src="myip.js" defer></script>
 <script src="myip-diag.js" defer></script>
 </body>
