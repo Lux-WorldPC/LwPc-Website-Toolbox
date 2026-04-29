@@ -147,6 +147,29 @@
     });
   }
 
+  /* ── 1bis. DB-IP enrichi (clé publique restreinte aux origins lwpc.lu,
+        injectée par Hugo via window.LWPC_DBIP_PUBLIC_KEY). Renvoie linkType
+        (dsl/cable/fttx/cellular/dialup), usageType (consumer/business/
+        corporate/hosting/cdn/government/...), isProxy + proxyType, isAnycast,
+        threatLevel + threatDetails, geoloc complète. C'est le signal qui
+        rend le diagnostic précis MONDIALEMENT et permet de retirer le
+        mapping ASN luxembourgeois hardcodé.
+
+        Endpoint /self : DB-IP utilise l'IP de la requête (pas besoin de
+        passer l'IP). La clé publique ne marche QUE pour cette IP — on ne
+        peut pas l'abuser pour faire du lookup arbitraire. */
+  function fetchDbip() {
+    var key = (typeof window !== 'undefined' && window.LWPC_DBIP_PUBLIC_KEY) || '';
+    if (!key) return Promise.resolve(null);
+    return fetch('https://api.db-ip.com/v2/' + encodeURIComponent(key) + '/self', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data || data.error) return null;
+        return data;
+      })
+      .catch(function () { return null; });
+  }
+
   /* ── 2. RTT (5 fetches /api/myip/ping, médiane) + HTTP (nextHopProtocol)
         + TLS (Cloudflare trace champ tls=). Le TLS ne peut pas venir de
         $ssl_protocol nginx car HAProxy fait le handshake TLS en amont
@@ -312,7 +335,7 @@
     /* Render IPv6 immédiatement (basé sur les données déjà collectées) */
     renderIpv6(hasIpv6, d.ipv6, false /* isCgnatV4 — déterminé après STUN */);
 
-    /* RTT + HTTP + TLS — en parallèle de la STUN probe */
+    /* RTT + HTTP + TLS — en parallèle de la STUN probe et du fetch DB-IP */
     var rttPromise = measureRtt().then(function (c) { renderConn(c); return c; });
 
     /* STUN probe — UNE seule RTCPeerConnection avec 2 STUN servers dans
@@ -320,8 +343,14 @@
     var stunUrls = ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'];
     var probePromise = stunProbe(stunUrls);
 
-    Promise.all([probePromise, rttPromise]).then(function (results) {
+    /* DB-IP enrichi — fetch en parallèle du STUN. Si la clé publique est
+       absente ou DB-IP renvoie une erreur, on tombe sur null et le scoring
+       retombe sur la logique ASN hardcodée (fallback rétrocompatible). */
+    var dbipPromise = fetchDbip();
+
+    Promise.all([probePromise, rttPromise, dbipPromise]).then(function (results) {
       var probe = results[0];
+      var dbip = results[2];
 
       /* Host candidates — affichage Local Network */
       renderLocal(probe.host || []);
@@ -375,30 +404,40 @@
         renderIpv6(true, d.ipv6, true);
       }
 
-      /* ── ASN matching — FAI luxembourgeois connus pour CGNAT par défaut.
-            Côté client, sans 100.64/10 ni IPs publiques pool, on ne peut pas
-            distinguer cone NAT direct vs CGNAT bien comporté (les deux
-            montrent 1 srflx stable). Le seul signal restant est l'ASN.
+      /* ── DB-IP — Network Owner enrichi avec linkType + usageType ── */
+      if (dbip) renderOwnerEnriched(dbip);
 
-            Liste conservatrice des AS luxembourgeois où CGNAT est la norme :
-              - AS6661  POST Luxembourg — POP Internet fixe ET data mobile
-                CGNAT par défaut. IP publique en option payante.
-              - AS56601 Orange Communications Lux — data mobile, CGNAT
-                systématique.
-              - AS5605  Tango / Proximus LU — mobile CGNAT, fixe selon offre.
+      /* ── Threat / proxy banner si signal fort DB-IP ── */
+      if (dbip) renderThreatBanner(dbip);
 
-            (Sera étendu via /toolbox/myip/data/luxembourg-isps.json en inc 3.) */
+      /* ── ASN matching luxembourgeois (fallback si DB-IP absent) ──
+            Si DB-IP n'a pas répondu (clé absente, trial expiré, panne),
+            on retombe sur le mini-mapping inline qui couvre les 3 FAI lux.
+            Sinon la logique DB-IP qui suit prend la priorité. */
       var asn = d.asn != null ? String(d.asn) : '';
       var asnCgnatHint = null;
-      if (asn === '6661') {
-        asnCgnatHint = lbl('lblAsnPost', 'AS6661 (POST Luxembourg) — CGNAT by default on fixed POP Internet AND mobile. A public-IP option is available.');
-      } else if (asn === '56601') {
-        asnCgnatHint = lbl('lblAsnOrange', 'AS56601 (Orange Luxembourg) — mobile data is systematically CGNATed.');
-      } else if (asn === '5605') {
-        asnCgnatHint = lbl('lblAsnTango', 'AS5605 (Tango / Proximus LU) — CGNAT on mobile data. Fixed depends on plan.');
+      if (!dbip) {
+        if (asn === '6661') {
+          asnCgnatHint = lbl('lblAsnPost', 'AS6661 (POST Luxembourg) — CGNAT by default on fixed POP Internet AND mobile. A public-IP option is available.');
+        } else if (asn === '56601') {
+          asnCgnatHint = lbl('lblAsnOrange', 'AS56601 (Orange Luxembourg) — mobile data is systematically CGNATed.');
+        } else if (asn === '5605') {
+          asnCgnatHint = lbl('lblAsnTango', 'AS5605 (Tango / Proximus LU) — CGNAT on mobile data. Fixed depends on plan.');
+        }
       }
 
-      /* ── VERDICT SCORING ── */
+      /* ── VERDICT SCORING ──
+         Ordre de priorité (du plus fiable au moins fiable) :
+           1. 100.64/10 confirmé STUN  → 🔴 CGNAT (RFC 6598, signal direct)
+           2. STUN symmetric (IP varie) → 🔴 CGNAT (vrai pool CGNAT visible)
+           3. DB-IP linkType=cellular   → 🔴 CGNAT mobile (mondial)
+           4. DB-IP usageType=hosting/cdn → 🟡 VPN/cloud probable
+           5. DB-IP isProxy=true        → 🟡/🔴 selon proxyType
+           6. DB-IP usageType=business/corporate → 🟢 IP fixe pro (override
+              le hint ASN POST/Tango pour les clients business avec IP fixe)
+           7. ASN hardcodé lux (fallback si DB-IP absent) → 🔴 CGNAT
+           8. STUN cone               → 🟢 direct
+           9. Sinon                   → 🟡 uncertain */
       var state = 'unknown', reason = '';
 
       if (natType === 'no-webrtc') {
@@ -410,9 +449,24 @@
       } else if (natType === 'symmetric') {
         state = 'cgnat';
         reason = lbl('lblSymmetric', 'Symmetric NAT — public IP varies between STUN servers (CGNAT pool).');
+      } else if (dbip && (dbip.linkType === 'cellular' || dbip.usageType === 'cellular')) {
+        state = 'cgnat';
+        reason = lbl('lblCellular', 'Cellular network detected — mobile data is almost always CGNATed.');
+      } else if (dbip && dbip.isProxy && dbip.proxyType === 'tor') {
+        state = 'cgnat';
+        reason = lbl('lblTor', 'Tor exit node detected — your apparent IP is shared and not yours.');
+      } else if (dbip && dbip.isProxy && dbip.proxyType === 'vpn') {
+        state = 'uncertain';
+        reason = lbl('lblVpn', 'VPN detected — your apparent IP belongs to a VPN provider, not your home/office network.');
+      } else if (dbip && (dbip.usageType === 'hosting' || dbip.usageType === 'cdn')) {
+        state = 'uncertain';
+        reason = lbl('lblHosting', 'Hosting/CDN IP — likely a VPN, cloud server or proxy, not a residential connection.');
+      } else if (dbip && (dbip.usageType === 'business' || dbip.usageType === 'corporate')) {
+        /* Override du fallback ASN : un client business sur AS6661 avec
+           usageType=corporate a probablement l'option IP publique fixe. */
+        state = 'direct';
+        reason = '';
       } else if (asnCgnatHint) {
-        /* ASN connu pour CGNAT par défaut → verdict 🔴 même si STUN montre
-           1 IP stable. Le CGNAT bien comporté est invisible côté STUN seul. */
         state = 'cgnat';
         reason = asnCgnatHint;
       } else if (natType === 'cone') {
@@ -425,6 +479,64 @@
 
       renderVerdict(state, { reason: reason });
     });
+  }
+
+  /* ── Render helpers DB-IP ─────────────────────────────────── */
+
+  function renderOwnerEnriched(dbip) {
+    /* Étend la card "Network Owner" déjà alimentée par myip.js (RIPE)
+       avec linkType + usageType (badge), sans tout réécrire — on append
+       une ligne en bas. Sans casser le rendu si l'élément a été manipulé. */
+    var el = document.getElementById('myip-org');
+    if (!el) return;
+    var badges = '';
+    if (dbip.linkType) {
+      badges += '<span class="domain-badge" style="background:#3d539422;color:#3d5394;border:1px solid #3d539455;">' +
+        esc(String(dbip.linkType).toUpperCase()) + '</span>';
+    }
+    if (dbip.usageType) {
+      var color = '#8b949e';
+      var ut = String(dbip.usageType).toLowerCase();
+      if (ut === 'consumer') color = '#27ae60';
+      else if (ut === 'business' || ut === 'corporate') color = '#3d5394';
+      else if (ut === 'hosting' || ut === 'cdn') color = '#f1c40f';
+      else if (ut === 'cellular') color = '#e74c3c';
+      badges += ' <span class="domain-badge" style="background:' + color + '22;color:' + color + ';border:1px solid ' + color + '55;">' +
+        esc(String(dbip.usageType).toUpperCase()) + '</span>';
+    }
+    if (badges) {
+      el.innerHTML += '<div style="margin-top:0.4rem;">' + badges + '</div>';
+    }
+  }
+
+  function renderThreatBanner(dbip) {
+    /* Si DB-IP signale un threat élevé ou un proxy abusif, on ajoute
+       un bandeau au-dessus du verdict. Affiché uniquement si signal fort. */
+    if (!dbip) return;
+    var msgs = [];
+    if (dbip.threatLevel === 'high') {
+      msgs.push(lbl('lblThreatHigh', 'High threat level reported for this IP (attack source, abuse, etc.).'));
+    }
+    if (dbip.isProxy && dbip.proxyType === 'tor') {
+      msgs.push(lbl('lblProxyTor', 'IP listed as a Tor exit node.'));
+    }
+    if (Array.isArray(dbip.threatDetails) && dbip.threatDetails.length) {
+      msgs.push(esc(dbip.threatDetails.join(', ')));
+    }
+    if (!msgs.length) return;
+    var el = document.getElementById('myip-verdict');
+    if (!el) return;
+    /* Insertion après le verdict, avant les détails — on évite de casser
+       le data-state du verdict en ajoutant un sibling. */
+    var existing = document.getElementById('myip-threat-banner');
+    if (existing) existing.parentNode.removeChild(existing);
+    var banner = document.createElement('div');
+    banner.id = 'myip-threat-banner';
+    banner.setAttribute('role', 'alert');
+    banner.style.cssText = 'background:#e74c3c11;border:1px solid #e74c3c55;border-left:4px solid #e74c3c;border-radius:var(--radius);padding:0.7rem 1rem;font-size:0.85rem;color:var(--text);';
+    banner.innerHTML = '<strong>⚠ ' + esc(lbl('lblThreatTitle', 'Threat signals')) + '</strong><br>' +
+      msgs.map(function (m) { return esc(m); }).join('<br>');
+    el.parentNode.insertBefore(banner, el.nextSibling);
   }
 
   /* ── Wiring ────────────────────────────────────────────────── */

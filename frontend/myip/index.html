@@ -85,6 +85,13 @@
          data-lbl-asn-post="AS6661 (POST Luxembourg) — CGNAT by default on fixed POP Internet AND mobile data. A paid public-IP option is available."
          data-lbl-asn-orange="AS56601 (Orange Luxembourg) — mobile data is systematically CGNATed."
          data-lbl-asn-tango="AS5605 (Tango / Proximus LU) — CGNAT on mobile data. Fixed line depends on the plan."
+         data-lbl-cellular="Cellular network detected — mobile data is almost always CGNATed."
+         data-lbl-tor="Tor exit node detected — your apparent IP is shared and not yours."
+         data-lbl-vpn="VPN detected — your apparent IP belongs to a VPN provider, not your home/office network."
+         data-lbl-hosting="Hosting / CDN IP — likely a VPN, cloud server or proxy, not a residential connection."
+         data-lbl-threat-title="Threat signals"
+         data-lbl-threat-high="High threat level reported for this IP (attack source, abuse, etc.)."
+         data-lbl-proxy-tor="IP listed as a Tor exit node."
          data-lbl-open="Open / endpoint-independent"
          data-lbl-cgnat-confirmed="IP detected in 100.64.0.0/10 (RFC 6598)."
          data-lbl-ipv6-yes="Connected"
@@ -138,6 +145,9 @@
   Part of <a href="https://github.com/Lux-WorldPC/toolbox">@lwpc/toolbox</a> — MIT licensed
 </footer>
 
+<!-- Optional: DB-IP public API key for richer diagnostic (linkType, usageType, isProxy, threatLevel).
+     Restrict the key to your own domain in the DB-IP dashboard. Leave empty to skip silently. -->
+<script>window.LWPC_DBIP_PUBLIC_KEY = "";</script>
 <script src="myip.js" defer></script>
 <script src="myip-diag.js" defer></script>
 </body>
