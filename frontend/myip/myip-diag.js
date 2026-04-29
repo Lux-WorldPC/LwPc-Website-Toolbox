@@ -6,10 +6,9 @@
  * 'lwpc-myip-ready' sur document. Lance en parallèle :
  *
  *   1. WebRTC/STUN — UNE seule RTCPeerConnection avec 2 STUN servers
- *      (Cloudflare + Google) dans iceServers. Test RFC 5780 du NAT mapping
- *      behavior, mais avec regroupement par raddr (interface locale source)
- *      pour ne pas confondre multi-homing (Wi-Fi + Ethernet, VPN, Docker)
- *      avec symmetric NAT.
+ *      (Cloudflare + Google) dans iceServers. Le verdict CGNAT se base
+ *      sur la STABILITÉ DE L'IP PUBLIQUE entre les srflx (pas le port,
+ *      qui peut varier en multi-homing ou port-dependent NAT sans CGNAT).
  *   2. IPv6 reachability — utilise simplement le résultat Cloudflare trace
  *      capturé par myip.js (event detail.ipv6) : si présent, IPv6 OK.
  *   3. Connection quality — 5 fetches /api/myip/ping (médiane RTT),
@@ -212,14 +211,14 @@
     setCard('myip-local', html);
   }
 
-  function renderNat(natType) {
+  function renderNat(natType, portVariation) {
     var color = '#8b949e', label = natType || 'unknown';
     if (natType === 'symmetric') {
       color = '#e74c3c';
       label = lbl('lblSymmetric', 'Symmetric NAT (CGNAT very likely)');
     } else if (natType === 'cone') {
       color = '#27ae60';
-      label = lbl('lblCone', 'Cone NAT (consistent mapping)');
+      label = lbl('lblCone', 'Cone NAT (consistent address)');
     } else if (natType === 'open') {
       color = '#27ae60';
       label = lbl('lblOpen', 'Open / endpoint-independent');
@@ -227,6 +226,12 @@
       label = lbl('lblNoWebrtc', 'WebRTC unavailable');
     }
     var html = '<div><span class="domain-badge" style="background:' + color + '22;color:' + color + ';border:1px solid ' + color + '55;font-size:0.85rem;">' + esc(label) + '</span></div>';
+    /* Port-variation note — informative, pas un signal CGNAT à elle seule
+       (commun en multi-homing ou port-dependent mapping). */
+    if (portVariation && natType === 'cone') {
+      html += '<div style="margin-top:0.4rem;color:var(--text-3);font-size:0.75rem;">' +
+        esc(lbl('lblPortVariation', 'Port mapping varies by destination — common with multi-homing (Wi-Fi+Ethernet, VPN, Docker) or port-dependent NAT.')) + '</div>';
+    }
     setCard('myip-nat', html);
   }
 
@@ -330,43 +335,37 @@
          tous identiques (cone) ou divergents (symmetric). */
       renderStun(probe.srflx || [], stunUrls);
 
-      /* Analyse symmetric vs cone — IMPORTANT : il faut comparer SEULEMENT
-         des srflx qui sortent du MÊME chemin réseau (même raddr = même
-         interface locale + socket). Un client multi-homed (Wi-Fi + Ethernet,
-         VPN, Docker, adaptateurs virtuels) émet une host candidate par
-         interface → chaque interface ouvre son propre socket UDP éphémère
-         → ports srflx différents même en cone NAT, ce qui n'est PAS un
-         signal symmetric (juste du multi-homing).
-
-         On groupe donc les srflx par raddr et on cherche l'INCONSISTANCE
-         INTRA-RADDR : si deux srflx sortant de la même interface ont des
-         (ip, port) différents → symmetric NAT vraiment. Sinon → cone. */
+      /* Classification NAT — basée sur l'IP publique, pas sur le port.
+         Le port mapping (cone full / address-restricted / port-restricted /
+         symmetric) n'est PAS un proxy fiable pour CGNAT depuis 2 STUN seuls :
+           - Multi-homing (Wi-Fi + Eth, VPN, Docker) → ports différents
+             par interface, pas un signal symmetric.
+           - Chrome avec mDNS masque les raddr en 0.0.0.0 → impossible de
+             grouper par interface.
+           - Port-dependent mapping (cone NAT cohérent par adresse mais
+             port variable selon dest) ≠ CGNAT.
+         Le vrai signal CGNAT côté client est :
+           - une IP publique en 100.64.0.0/10 (RFC 6598) — déjà géré ailleurs
+           - une IP publique qui CHANGE entre 2 STUN servers (= pool CGNAT)
+         Si l'IP publique est stable, on retient "cone" même si les ports
+         varient (et on rend ça lisible dans la card). */
       var natType = 'unknown';
+      var portVariation = false;
       if (probe.error === 'no-webrtc') natType = 'no-webrtc';
       else if (!probe.srflx || !probe.srflx.length) natType = 'unknown';
       else {
-        var byRaddr = {};
+        var publicIps = {};
+        var pairs = {};
         probe.srflx.forEach(function (s) {
-          var k = s.raddr || '_unknown';
-          if (!byRaddr[k]) byRaddr[k] = {};
-          byRaddr[k][s.address + ':' + s.port] = true;
+          publicIps[s.address] = true;
+          pairs[s.address + ':' + s.port] = true;
         });
-        var symmetricEvidence = false;
-        var coneEvidence = false;
-        Object.keys(byRaddr).forEach(function (raddr) {
-          var n = Object.keys(byRaddr[raddr]).length;
-          if (n > 1) symmetricEvidence = true;
-          else if (n === 1) coneEvidence = true;
-        });
-        /* Si on n'a aucune comparaison intra-raddr possible (1 seul srflx
-           par interface, ou aucun raddr fiable), on retient "cone" par
-           défaut — c'est le cas standard et l'absence de preuve d'inconsis-
-           tance ne justifie pas un verdict 🔴 alarmiste. */
-        if (symmetricEvidence) natType = 'symmetric';
-        else if (coneEvidence) natType = 'cone';
-        else natType = 'unknown';
+        var nIps = Object.keys(publicIps).length;
+        portVariation = Object.keys(pairs).length > nIps;
+        if (nIps === 1) natType = 'cone';
+        else natType = 'symmetric';
       }
-      renderNat(natType);
+      renderNat(natType, portVariation);
 
       /* Mise à jour IPv6 reachability avec contexte CGNAT */
       var srflxIp = (probe.srflx && probe.srflx[0] && probe.srflx[0].address) || ipv4;
