@@ -6,16 +6,17 @@
  * 'lwpc-myip-ready' sur document. Lance en parallèle :
  *
  *   1. WebRTC/STUN — UNE seule RTCPeerConnection avec 2 STUN servers
- *      (Cloudflare + Google) dans iceServers. Le verdict CGNAT se base
- *      sur la STABILITÉ DE L'IP PUBLIQUE entre les srflx (pas le port,
- *      qui peut varier en multi-homing ou port-dependent NAT sans CGNAT).
- *   2. IPv6 reachability — utilise simplement le résultat Cloudflare trace
- *      capturé par myip.js (event detail.ipv6) : si présent, IPv6 OK.
+ *      (Cloudflare + Google) dans iceServers. Verdict CGNAT basé sur
+ *      la STABILITÉ DE L'IP PUBLIQUE entre srflx (pas le port).
+ *   2. IPv6 reachability — résultat Cloudflare trace de myip.js.
  *   3. Connection quality — 5 fetches /api/myip/ping (médiane RTT),
- *      lecture nextHopProtocol via PerformanceResourceTiming (HTTP version),
+ *      nextHopProtocol via PerformanceResourceTiming (HTTP version),
  *      TLS via Cloudflare cdn-cgi/trace champ tls=.
- *   4. Verdict scoring — combine tous les signaux en un état 🟢/🟡/🔴/⚪
- *      affiché dans la card #myip-verdict.
+ *   4. ASN matching — petite liste de FAI luxembourgeois CGNAT par
+ *      défaut (POST 6661, Orange 56601, Tango 5605) car STUN seul ne
+ *      détecte pas un CGNAT bien comporté (1 IP publique stable). Pour
+ *      d'autres pays, étendre cette liste ou la passer en paramètre.
+ *   5. Verdict scoring — combine STUN + ASN en un état 🟢/🟡/🔴/⚪.
  *
  * Aucune dépendance, aucun framework. Toutes les sondes sont initiées côté
  * navigateur (sortantes). Aucun scan TCP entrant — les EDR/AV/SIEM ne
@@ -374,7 +375,30 @@
         renderIpv6(true, d.ipv6, true);
       }
 
-      /* ── VERDICT SCORING (partiel — sera enrichi inc. 3 avec ASN cloud/Tor) ── */
+      /* ── ASN matching — FAI luxembourgeois connus pour CGNAT par défaut.
+            Côté client, sans 100.64/10 ni IPs publiques pool, on ne peut pas
+            distinguer cone NAT direct vs CGNAT bien comporté (les deux
+            montrent 1 srflx stable). Le seul signal restant est l'ASN.
+
+            Liste conservatrice des AS luxembourgeois où CGNAT est la norme :
+              - AS6661  POST Luxembourg — POP Internet fixe ET data mobile
+                CGNAT par défaut. IP publique en option payante.
+              - AS56601 Orange Communications Lux — data mobile, CGNAT
+                systématique.
+              - AS5605  Tango / Proximus LU — mobile CGNAT, fixe selon offre.
+
+            (Sera étendu via /toolbox/myip/data/luxembourg-isps.json en inc 3.) */
+      var asn = d.asn != null ? String(d.asn) : '';
+      var asnCgnatHint = null;
+      if (asn === '6661') {
+        asnCgnatHint = lbl('lblAsnPost', 'AS6661 (POST Luxembourg) — CGNAT by default on fixed POP Internet AND mobile. A public-IP option is available.');
+      } else if (asn === '56601') {
+        asnCgnatHint = lbl('lblAsnOrange', 'AS56601 (Orange Luxembourg) — mobile data is systematically CGNATed.');
+      } else if (asn === '5605') {
+        asnCgnatHint = lbl('lblAsnTango', 'AS5605 (Tango / Proximus LU) — CGNAT on mobile data. Fixed depends on plan.');
+      }
+
+      /* ── VERDICT SCORING ── */
       var state = 'unknown', reason = '';
 
       if (natType === 'no-webrtc') {
@@ -385,7 +409,12 @@
         reason = lbl('lblCgnatConfirmed', 'IP detected in 100.64.0.0/10 (RFC 6598).');
       } else if (natType === 'symmetric') {
         state = 'cgnat';
-        reason = lbl('lblSymmetric', 'Symmetric NAT (CGNAT very likely).');
+        reason = lbl('lblSymmetric', 'Symmetric NAT — public IP varies between STUN servers (CGNAT pool).');
+      } else if (asnCgnatHint) {
+        /* ASN connu pour CGNAT par défaut → verdict 🔴 même si STUN montre
+           1 IP stable. Le CGNAT bien comporté est invisible côté STUN seul. */
+        state = 'cgnat';
+        reason = asnCgnatHint;
       } else if (natType === 'cone') {
         state = 'direct';
         reason = '';
